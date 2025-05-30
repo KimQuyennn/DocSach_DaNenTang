@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { FlatList, Text, View, Image, StyleSheet, TouchableOpacity, TextInput, ScrollView } from 'react-native';
+import { FlatList, Text, View, Image, StyleSheet, TouchableOpacity, TextInput, ScrollView, ActivityIndicator, Platform } from 'react-native';
 import { getDatabase, ref, onValue } from 'firebase/database';
 import { app } from '../firebase';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
+import { getAuth } from 'firebase/auth';
 
 const removeHTMLTags = (text) => {
     if (!text) return "";
@@ -12,43 +13,175 @@ const removeHTMLTags = (text) => {
 
 export default function Home() {
     const [recommendedBooks, setRecommendedBooks] = useState([]);
-    const [readingBooks, setReadingBooks] = useState([]);
+    const [readingBooks, setReadingBooks] = useState([]); // Sách "Đang đọc" theo lịch sử
     const [suggestedBooks, setSuggestedBooks] = useState([]);
-    const [completedBooks, setCompletedBooks] = useState([]); // New state for completed books
+    const [completedBooks, setCompletedBooks] = useState([]); // Sách "Hoàn thành" theo trạng thái
     const [searchQuery, setSearchQuery] = useState('');
+    const [userId, setUserId] = useState(null);
+    const [isLoading, setIsLoading] = useState(true);
+    const [userData, setUserData] = useState(null);
+    const [avatar, setAvatar] = useState(null);
+
     const navigation = useNavigation();
+    const db = getDatabase(app);
+    const auth = getAuth(app);
 
     useEffect(() => {
-        const db = getDatabase(app);
-        const booksRef = ref(db, 'Books');
-
-        const unsubscribe = onValue(booksRef, (snapshot) => {
-            const data = snapshot.val();
-            if (data) {
-                const loadedBooks = Object.keys(data).map((key) => ({
-                    id: key,
-                    ...data[key],
-                }));
-
-                // For now, let's just use a slice of the data for each section
-                setRecommendedBooks(loadedBooks.slice(0, 3));
-                setReadingBooks(loadedBooks.slice(1, 3));
-                setSuggestedBooks(loadedBooks.slice(3, 6)); // Increased slice for suggested
-                setCompletedBooks(loadedBooks.slice(6, 10)); // Example slice for completed
+        const unsubscribeAuth = auth.onAuthStateChanged((user) => {
+            if (user) {
+                setUserId(user.uid);
             } else {
-                setRecommendedBooks([]);
-                setReadingBooks([]);
-                setSuggestedBooks([]);
-                setCompletedBooks([]);
+                setUserId(null);
+                setUserData(null);
+                setAvatar(null);
             }
         });
+        return () => unsubscribeAuth();
+    }, [auth]);
 
-        return () => unsubscribe();
-    }, []);
+    useEffect(() => {
+        if (userId) {
+            const userRef = ref(db, `Users/${userId}`);
+            const unsubscribeDB = onValue(userRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    setUserData(data);
+                    setAvatar(data.Avatar || null);
+                } else {
+                    setUserData(null);
+                    setAvatar(null);
+                }
+            });
+            return () => unsubscribeDB();
+        }
+    }, [db, userId]);
+
+    useEffect(() => {
+        const fetchBooksAndHistory = async () => {
+            setIsLoading(true);
+
+            const booksRef = ref(db, 'Books');
+            const ratingsRef = ref(db, 'Ratings');
+            const readingHistoryRef = ref(db, `ReadingHistory`);
+
+            let allBooks = [];
+
+            const unsubscribeBooks = onValue(booksRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    allBooks = Object.keys(data).map((key) => ({
+                        id: key,
+                        ...data[key],
+                        averageRating: 0,
+                    }));
+                } else {
+                    allBooks = [];
+                }
+
+                const approvedBooks = allBooks.filter(book => book.IsApproved === true);
+
+                onValue(ratingsRef, (ratingsSnapshot) => {
+                    const ratingsData = ratingsSnapshot.val();
+                    const bookRatings = {};
+
+                    if (ratingsData) {
+                        for (const key in ratingsData) {
+                            const rating = ratingsData[key];
+                            if (bookRatings[rating.BookId]) {
+                                bookRatings[rating.BookId].totalRating += rating.Rating;
+                                bookRatings[rating.BookId].count++;
+                            } else {
+                                bookRatings[rating.BookId] = { totalRating: rating.Rating, count: 1 };
+                            }
+                        }
+                    }
+
+                    let booksWithRatings = approvedBooks.map(book => {
+                        if (bookRatings[book.id]) {
+                            book.averageRating = bookRatings[book.id].totalRating / bookRatings[book.id].count;
+                        }
+                        return book;
+                    });
+
+                    const sortedRecommended = [...booksWithRatings].sort((a, b) => b.averageRating - a.averageRating);
+                    setRecommendedBooks(sortedRecommended.slice(0, 6));
+                    setSuggestedBooks(booksWithRatings.slice(0, 10));
+
+                    // --- Lấy sách đang đọc từ lịch sử đọc (chỉ lưu 1 lần theo thời gian đọc gần nhất) ---
+                    if (userId) {
+                        onValue(readingHistoryRef, (historySnapshot) => {
+                            const historyData = historySnapshot.val();
+                            const tempReadingBooks = {}; // Use an object to store unique books by ID
+                            const userCompletedBooks = []; // This will now be filtered by book Status
+
+                            if (historyData) {
+                                for (const key in historyData) {
+                                    const historyEntry = historyData[key];
+                                    if (historyEntry.UserId === userId) {
+                                        const book = booksWithRatings.find(b => b.id === historyEntry.BookId);
+                                        if (book) {
+                                            // Only consider books that are NOT completed in history for "Đang đọc"
+                                            if (!historyEntry.IsCompleted) {
+                                                const existingBook = tempReadingBooks[book.id];
+                                                if (!existingBook || new Date(historyEntry.LastReadAt) > new Date(existingBook.LastReadAt)) {
+                                                    // If book not exists or current entry is more recent, update it
+                                                    tempReadingBooks[book.id] = {
+                                                        ...book,
+                                                        LastReadChapterId: historyEntry.LastReadChapterId,
+                                                        LastReadAt: historyEntry.LastReadAt,
+                                                    };
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // Convert the object back to an array and sort
+                            const finalReadingBooks = Object.values(tempReadingBooks).sort((a, b) => new Date(b.LastReadAt) - new Date(a.LastReadAt));
+                            setReadingBooks(finalReadingBooks.slice(0, 5)); // Hiển thị 5 sách đang đọc gần nhất
+
+                            // --- Lọc sách đã hoàn thành dựa trên trạng thái của sách (Status: "Đang cập nhật") ---
+                            const booksMarkedAsCompleted = booksWithRatings.filter(book => book.Status === "Đang cập nhật");
+                            setCompletedBooks(booksMarkedAsCompleted.slice(0, 15));
+
+                            setIsLoading(false);
+                        }, (error) => {
+                            console.error("Error fetching reading history:", error);
+                            setIsLoading(false);
+                        });
+                    } else {
+                        setReadingBooks([]);
+                        setCompletedBooks(booksWithRatings.filter(book => book.Status === "Đang cập nhật").slice(0, 15));
+                        setIsLoading(false);
+                    }
+                }, { onlyOnce: true });
+            }, (error) => {
+                console.error("Error fetching books:", error);
+                setIsLoading(false);
+            });
+
+            return () => {
+                unsubscribeBooks();
+            };
+        };
+
+        if (userId !== undefined) {
+            fetchBooksAndHistory();
+        }
+    }, [userId, db]);
 
     const filteredBooks = [...recommendedBooks, ...readingBooks, ...suggestedBooks, ...completedBooks].filter(book =>
         book.Title.toLowerCase().includes(searchQuery.toLowerCase())
     );
+
+    if (isLoading) {
+        return (
+            <View style={styles.loadingContainer}>
+                <ActivityIndicator size="large" color="#FF69B4" />
+                <Text style={styles.loadingText}>Đang tải dữ liệu...</Text>
+            </View>
+        );
+    }
 
     return (
         <View style={styles.container}>
@@ -67,55 +200,79 @@ export default function Home() {
                         <Ionicons name="gift-outline" size={24} color="#FFC107" />
                     </TouchableOpacity>
                     <TouchableOpacity style={styles.profileButton} onPress={() => navigation.navigate('Thongtin')}>
-                        <Ionicons name="person-circle-outline" size={30} color="#333" />
+                        {avatar ? (
+                            <Image source={{ uri: avatar }} style={styles.profileAvatar} />
+                        ) : (
+                            <Ionicons name="person-circle-outline" size={30} color="#333" />
+                        )}
                     </TouchableOpacity>
                 </View>
             </View>
 
             <ScrollView>
-                {/* Section 1: Recommended Stories */}
+                {/* Section 1: Recommended Stories (sách hay nhất để xuất cho bạn) */}
                 <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Truyện hay nhất để xuất cho bạn</Text>
-                    <FlatList
-                        data={recommendedBooks}
-                        renderItem={({ item }) => (
-                            <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.horizontalBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.horizontalCoverImage} />
-                                <Text style={styles.horizontalBookAuthor} numberOfLines={1}>{item.Title}</Text>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    <Text style={styles.sectionTitle}>Sách hay nhất để xuất cho bạn</Text>
+                    {recommendedBooks.length > 0 ? (
+                        <FlatList
+                            data={recommendedBooks}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.horizontalBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.horizontalCoverImage} />
+                                    <Text style={styles.horizontalBookAuthor} numberOfLines={1}>{item.Title}</Text>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noBooksText}>Không có sách đề xuất.</Text>
+                    )}
                 </View>
 
-                {/* Section 2: Currently Reading */}
+                {/* Section 2: Currently Reading (sách bạn đang đọc) */}
                 <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Truyện bạn đang đọc</Text>
-                    <FlatList
-                        data={readingBooks}
-                        renderItem={({ item }) => (
-                            <TouchableOpacity style={styles.readingBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.readingCoverImage} />
-                                <View style={styles.readingInfo}>
-                                    <Text style={styles.readingStatus}>Tiếp tục</Text>
-                                    <Text style={styles.readingChapter}>Chương 21</Text> {/* Replace with actual chapter info */}
-                                </View>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    <Text style={styles.sectionTitle}>Sách bạn đang đọc</Text>
+                    {readingBooks.length > 0 ? (
+                        <FlatList
+                            data={readingBooks}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity
+                                    onPress={() => {
+                                        let chapterIdToNavigate = item.LastReadChapterId;
+                                        navigation.navigate('DocSach', {
+                                            bookId: item.id,
+                                            chapterId: chapterIdToNavigate,
+                                            bookTitle: item.Title
+                                        });
+                                    }}
+                                    style={styles.readingBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.readingCoverImage} />
+                                    <View style={styles.readingInfo}>
+                                        <Text style={styles.readingTitle} numberOfLines={1}>{item.Title}</Text>
+                                        <Text style={styles.readingStatus}>Đang đọc</Text>
+                                        <Text style={styles.readingChapter}>
+                                            {item.LastReadChapterId ? `Đọc tiếp` : 'Chưa đọc chương nào'}
+                                        </Text>
+                                    </View>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noReadingBooksText}>Bạn chưa đọc cuốn sách nào. Hãy tìm kiếm và bắt đầu đọc!</Text>
+                    )}
                     <View style={styles.exploreContainer}>
                         <View>
-                            <Text style={styles.exploreTitle}>Khám phá thêm truyện...</Text>
+                            <Text style={styles.exploreTitle}>Khám phá thêm sách...</Text>
                             <Text style={styles.exploreSubtitle}>để bổ sung vào thư viện...</Text>
                         </View>
                         <TouchableOpacity style={styles.searchBarContainer} onPress={() => navigation.navigate('TimKiem')}>
                             <Ionicons name="search-outline" size={20} color="#888" style={styles.searchIcon} />
-                            <Text style={styles.searchText}>Tìm truyện</Text>
+                            <Text style={styles.searchText}>Tìm sách</Text>
                         </TouchableOpacity>
                     </View>
                 </View>
@@ -123,72 +280,88 @@ export default function Home() {
                 {/* Section 3: Suggested for You */}
                 <View style={styles.section}>
                     <Text style={styles.sectionTitle}>Được đề xuất cho bạn</Text>
-                    <FlatList
-                        data={suggestedBooks}
-                        renderItem={({ item }) => (
-                            <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.horizontalBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.horizontalCoverImage} />
-                                <Text style={styles.horizontalBookAuthor} numberOfLines={1}>{item.Title}</Text>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    {suggestedBooks.length > 0 ? (
+                        <FlatList
+                            data={suggestedBooks}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.horizontalBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.horizontalCoverImage} />
+                                    <Text style={styles.horizontalBookAuthor} numberOfLines={1}>{item.Title}</Text>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noBooksText}>Không có sách được đề xuất.</Text>
+                    )}
                 </View>
 
-                {/* Section 4: Completed Stories (Based on your image) */}
+                {/* Section 4: Completed Stories (Sách đã Hoàn Thành) */}
                 <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Truyện đã Hoàn Thành</Text>
-                    <FlatList
-                        data={completedBooks}
-                        renderItem={({ item }) => (
-                            <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.completedBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.completedCoverImage} />
-                                <Text style={styles.completedBookTitle} numberOfLines={2}>{item.Title}</Text>
-                                <Text style={styles.completedBookAuthor} numberOfLines={1}>{item.Author}</Text>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    <Text style={styles.sectionTitle}>Sách đã Hoàn Thành</Text>
+                    {completedBooks.length > 0 ? (
+                        <FlatList
+                            data={completedBooks}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.completedBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.completedCoverImage} />
+                                    <Text style={styles.completedBookTitle} numberOfLines={2}>{item.Title}</Text>
+                                    <Text style={styles.completedBookAuthor} numberOfLines={1}>{item.Author}</Text>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noCompletedBooksText}>Chưa cuốn sách nào hoàn thành.</Text>
+                    )}
                 </View>
 
-                {/* Section 5: Try Reading New Stories (Based on your image) */}
+                {/* Section 5: Try Reading New Stories */}
                 <View style={styles.section}>
-                    <Text style={styles.sectionTitle}>Thử đọc Truyện Mới</Text>
-                    <FlatList
-                        data={suggestedBooks.slice(0, 4)} // Using a slice of suggested for example
-                        renderItem={({ item }) => (
-                            <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.squareBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.squareCoverImage} />
-                                <Text style={styles.squareBookTitle} numberOfLines={2}>{item.Title}</Text>
-                                <Text style={styles.squareBookAuthor} numberOfLines={1}>{item.Author}</Text>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    <Text style={styles.sectionTitle}>Thử đọc sách Mới</Text>
+                    {suggestedBooks.length > 0 ? (
+                        <FlatList
+                            data={suggestedBooks.slice(0, 8)}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.squareBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.squareCoverImage} />
+                                    <Text style={styles.squareBookTitle} numberOfLines={2}>{item.Title}</Text>
+                                    <Text style={styles.squareBookAuthor} numberOfLines={1}>{item.Author}</Text>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noBooksText}>Không có sách mới để thử đọc.</Text>
+                    )}
                 </View>
 
                 {/* Section 6: Recommended For You (Duplicate, adjust data as needed) */}
                 <View style={styles.section}>
                     <Text style={styles.sectionTitle}>Được chọn cho bạn</Text>
-                    <FlatList
-                        data={recommendedBooks.slice(0, 4)} // Using a slice of recommended for example
-                        renderItem={({ item }) => (
-                            <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.squareBookItem}>
-                                <Image source={{ uri: item.CoverImage }} style={styles.squareCoverImage} />
-                                <Text style={styles.squareBookTitle} numberOfLines={2}>{item.Title}</Text>
-                                <Text style={styles.squareBookAuthor} numberOfLines={1}>{item.Author}</Text>
-                            </TouchableOpacity>
-                        )}
-                        keyExtractor={(item) => item.id}
-                        horizontal
-                        showsHorizontalScrollIndicator={false}
-                    />
+                    {recommendedBooks.length > 0 ? (
+                        <FlatList
+                            data={recommendedBooks.slice(0, 8)}
+                            renderItem={({ item }) => (
+                                <TouchableOpacity onPress={() => navigation.navigate('Chitiet', { bookId: item.id })} style={styles.squareBookItem}>
+                                    <Image source={{ uri: item.CoverImage }} style={styles.squareCoverImage} />
+                                    <Text style={styles.squareBookTitle} numberOfLines={2}>{item.Title}</Text>
+                                    <Text style={styles.squareBookAuthor} numberOfLines={1}>{item.Author}</Text>
+                                </TouchableOpacity>
+                            )}
+                            keyExtractor={(item) => item.id}
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                        />
+                    ) : (
+                        <Text style={styles.noBooksText}>Không có sách được chọn cho bạn.</Text>
+                    )}
                 </View>
 
                 {/* Bottom Banner */}
@@ -208,15 +381,10 @@ export default function Home() {
                 <TouchableOpacity onPress={() => navigation.navigate('ThuVien')} style={styles.navItem} >
                     <Ionicons name="library-outline" size={24} color="#888" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.navItem}>
+                <TouchableOpacity onPress={() => navigation.navigate('Write')} style={styles.navItem}>
                     <Ionicons name="pencil-outline" size={24} color="#888" />
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.navItem}>
-                    <View style={styles.notificationBadge}>
-                        <Text style={styles.badgeText}>315</Text>
-                    </View>
-                    <Ionicons name="notifications-outline" size={24} color="#888" />
-                </TouchableOpacity>
+
             </View>
         </View>
     );
@@ -228,6 +396,17 @@ const styles = StyleSheet.create({
         backgroundColor: '#fff',
         paddingTop: 0,
     },
+    loadingContainer: {
+        flex: 1,
+        justifyContent: 'center',
+        alignItems: 'center',
+        backgroundColor: '#fff',
+    },
+    loadingText: {
+        marginTop: 10,
+        fontSize: 16,
+        color: '#555',
+    },
     topHeader: {
         flexDirection: 'row',
         justifyContent: 'space-between',
@@ -235,6 +414,7 @@ const styles = StyleSheet.create({
         paddingHorizontal: 15,
         paddingTop: 20,
         marginBottom: 15,
+        paddingTop: Platform.OS === 'ios' ? 40 : 20,
     },
     topHeaderLeft: {
         flexDirection: 'row',
@@ -275,6 +455,12 @@ const styles = StyleSheet.create({
     profileButton: {
         marginLeft: 10,
     },
+    profileAvatar: {
+        width: 30,
+        height: 30,
+        borderRadius: 15,
+        resizeMode: 'cover',
+    },
     section: {
         marginBottom: 20,
         paddingHorizontal: 15,
@@ -309,6 +495,7 @@ const styles = StyleSheet.create({
         marginRight: 10,
         padding: 10,
         alignItems: 'center',
+        width: 250,
     },
     readingCoverImage: {
         width: 60,
@@ -318,7 +505,14 @@ const styles = StyleSheet.create({
         resizeMode: 'cover',
     },
     readingInfo: {
+        flex: 1,
         justifyContent: 'center',
+    },
+    readingTitle: {
+        fontSize: 16,
+        fontWeight: 'bold',
+        color: '#333',
+        marginBottom: 3,
     },
     readingStatus: {
         fontSize: 14,
@@ -326,9 +520,29 @@ const styles = StyleSheet.create({
         marginBottom: 3,
     },
     readingChapter: {
-        fontSize: 16,
-        fontWeight: 'bold',
-        color: '#333',
+        fontSize: 13,
+        color: '#777',
+    },
+    noReadingBooksText: {
+        textAlign: 'center',
+        color: '#777',
+        marginTop: 10,
+        marginBottom: 20,
+        fontSize: 14,
+    },
+    noCompletedBooksText: {
+        textAlign: 'center',
+        color: '#777',
+        marginTop: 10,
+        marginBottom: 20,
+        fontSize: 14,
+    },
+    noBooksText: {
+        textAlign: 'center',
+        color: '#777',
+        marginTop: 10,
+        marginBottom: 20,
+        fontSize: 14,
     },
     exploreContainer: {
         flexDirection: 'row',
@@ -368,6 +582,7 @@ const styles = StyleSheet.create({
         backgroundColor: '#e0f7fa',
         paddingVertical: 15,
         alignItems: 'center',
+        marginTop: 20,
     },
     bottomBannerText: {
         fontSize: 16,
@@ -379,6 +594,7 @@ const styles = StyleSheet.create({
         paddingVertical: 10,
         borderTopWidth: 1,
         borderTopColor: '#eee',
+        backgroundColor: '#fff',
     },
     navItem: {
         alignItems: 'center',
@@ -395,13 +611,13 @@ const styles = StyleSheet.create({
         height: 20,
         justifyContent: 'center',
         alignItems: 'center',
+        zIndex: 1,
     },
     badgeText: {
         color: '#fff',
         fontSize: 10,
         fontWeight: 'bold',
     },
-    // Styles for the "Truyện đã Hoàn Thành" section
     completedBookItem: {
         marginRight: 15,
         width: 100,
@@ -425,7 +641,6 @@ const styles = StyleSheet.create({
         color: '#777',
         textAlign: 'center',
     },
-    // Styles for the "Thử đọc Truyện Mới" and "Được chọn cho bạn" sections (square items)
     squareBookItem: {
         marginRight: 15,
         width: 100,

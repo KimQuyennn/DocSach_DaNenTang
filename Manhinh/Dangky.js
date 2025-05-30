@@ -27,7 +27,7 @@ export default function Dangky() {
             await set(ref(db, 'Users/' + user.uid), {
                 Username: username,
                 Email: email,
-                Avatar: 'avatars/user1.jpg', // bạn có thể thay đổi ảnh mặc định này
+                Avatar: 'https://th.bing.com/th/id/OIP.vg41yG82qw84ziz5nS-CWQHaHa?rs=1&pid=ImgDetMain', // bạn có thể thay đổi ảnh mặc định này
                 Role: 'User',
                 CreatedAt: new Date().toISOString(),
                 LastLogin: new Date().toISOString(),

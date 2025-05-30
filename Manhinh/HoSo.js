@@ -1,12 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, TextInput, Image, ScrollView, Switch, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, Image, ScrollView, Switch, Platform, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { getDatabase, ref, onValue, update } from 'firebase/database';
-import { app } from '../firebase';
+import { app } from '../firebase'; // Đảm bảo đường dẫn này đúng với file khởi tạo Firebase của bạn
 import { useNavigation } from '@react-navigation/native';
 import { getAuth } from 'firebase/auth';
 import * as ImagePicker from 'expo-image-picker';
-import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
+
+// Cấu hình Cloudinary của bạn
+// THAY THẾ CÁC GIÁ TRỊ NÀY VỚI THÔNG TIN CLOUDINARY CỦA BẠN
+const CLOUDINARY_CLOUD_NAME = 'dpde9onm3';
+const CLOUDINARY_UPLOAD_PRESET = 'anhdaidienbooknet';
 
 const HoSo = () => {
     const navigation = useNavigation();
@@ -14,26 +18,35 @@ const HoSo = () => {
     const [displayName, setDisplayName] = useState('');
     const [showDisplayName, setShowDisplayName] = useState(true);
     const [userId, setUserId] = useState(null);
-    const [location, setLocation] = useState('');
-    const [bio, setBio] = useState('');
-    const [avatar, setAvatar] = useState(null);
-    const [coverPhoto, setCoverPhoto] = useState(null);
-    const [pronouns, setPronouns] = useState(''); // State for pronouns
+    const [avatar, setAvatar] = useState(null); // Giữ state cho avatar
+
+    // Các trường từ CSDL:
+    const [email, setEmail] = useState(''); // Chỉ hiển thị
+    const [role, setRole] = useState(''); // Chỉ hiển thị
+    const [createdAt, setCreatedAt] = useState(''); // Chỉ hiển thị
+    const [lastLogin, setLastLogin] = useState(''); // Chỉ hiển thị
+    const [passwordHash, setPasswordHash] = useState(''); // Chỉ hiển thị (không chỉnh sửa)
+    const [bio, setBio] = useState(''); // Có thể chỉnh sửa
+    const [location, setLocation] = useState(''); // Có thể chỉnh sửa
+    const [pronouns, setPronouns] = useState(''); // Có thể chỉnh sửa
+
     const auth = getAuth();
     const db = getDatabase(app);
-    const storage = getStorage(app);
 
+    // Effect để lắng nghe trạng thái đăng nhập của người dùng
     useEffect(() => {
         const unsubscribeAuth = auth.onAuthStateChanged((user) => {
             if (user) {
                 setUserId(user.uid);
             } else {
+                // Nếu người dùng chưa đăng nhập, chuyển hướng đến màn hình đăng nhập
                 navigation.navigate('Dangnhap');
             }
         });
-        return () => unsubscribeAuth();
+        return () => unsubscribeAuth(); // Hủy đăng ký lắng nghe khi component unmount
     }, [auth, navigation]);
 
+    // Effect để tải dữ liệu người dùng từ Firebase Realtime Database
     useEffect(() => {
         if (userId) {
             const userRef = ref(db, `Users/${userId}`);
@@ -43,62 +56,149 @@ const HoSo = () => {
                     setUserData(data);
                     setDisplayName(data.Username || '');
                     setShowDisplayName(data.showDisplayName !== undefined ? data.showDisplayName : true);
-                    setLocation(data.Location || '');
-                    setBio(data.Bio || '');
-                    setAvatar(data.Avatar || null);
-                    setCoverPhoto(data.CoverPhoto || null);
-                    setPronouns(data.Pronouns || ''); // Load pronouns
+                    setAvatar(data.Avatar || null); // Tải avatar từ dữ liệu
+
+                    // Tải các trường từ CSDL
+                    setEmail(data.Email || '');
+                    setRole(data.Role || '');
+                    setCreatedAt(data.CreatedAt || '');
+                    setLastLogin(data.LastLogin || '');
+                    setPasswordHash(data.PasswordHash || ''); // Tải PasswordHash
+                    setBio(data.Bio || ''); // Tải Bio
+                    setLocation(data.Location || ''); // Tải Location
+                    setPronouns(data.Pronouns || ''); // Tải Pronouns
+
                 } else {
-                    setUserData(null);
+                    setUserData(null); // Đặt lại dữ liệu nếu không tìm thấy người dùng
                 }
             });
-            return () => unsubscribeDB();
+            return () => unsubscribeDB(); // Hủy đăng ký lắng nghe khi component unmount
         }
     }, [db, userId]);
 
+    // Effect để cập nhật các trường input khi userData thay đổi
     useEffect(() => {
         if (userData) {
             setDisplayName(userData.Username || '');
-            setLocation(userData.Location || '');
+            setEmail(userData.Email || '');
+            setRole(userData.Role || '');
+            setCreatedAt(userData.CreatedAt || '');
+            setLastLogin(userData.LastLogin || '');
+            setPasswordHash(userData.PasswordHash || '');
             setBio(userData.Bio || '');
+            setLocation(userData.Location || '');
             setPronouns(userData.Pronouns || '');
         }
     }, [userData]);
 
-    const pickImage = async (type) => {
-        let result = await ImagePicker.launchImageLibraryAsync({
-            mediaTypes: ImagePicker.MediaTypeOptions.All,
-            allowsEditing: true,
-            aspect: [4, 3],
-            quality: 1,
-        });
+    // Hàm chọn ảnh từ thư viện
+    const pickImage = async () => {
+        console.log('Bắt đầu hàm pickImage...');
 
-        if (!result.canceled) {
-            if (type === 'avatar') {
-                setAvatar(result.assets[0].uri);
-            } else if (type === 'cover') {
-                setCoverPhoto(result.assets[0].uri);
+        // Yêu cầu quyền truy cập thư viện ảnh
+        if (Platform.OS !== 'web') {
+            console.log('Yêu cầu quyền truy cập thư viện ảnh...');
+            const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+            console.log('Trạng thái quyền truy cập thư viện ảnh:', status);
+
+            if (status !== 'granted') {
+                Alert.alert(
+                    'Quyền truy cập bị từ chối',
+                    'Ứng dụng cần quyền truy cập thư viện ảnh để chọn ảnh. Vui lòng cấp quyền trong cài đặt của thiết bị.'
+                );
+                return; // Dừng hàm nếu quyền không được cấp
             }
+        } else {
+            console.log('Đang chạy trên nền tảng web, bỏ qua yêu cầu quyền truy cập thư viện ảnh.');
+        }
+
+        console.log('Đang mở thư viện ảnh...');
+        try {
+            let mediaTypesConfig;
+            // Kiểm tra xem ImagePicker.MediaType có tồn tại không
+            if (ImagePicker.MediaType && ImagePicker.MediaType.Images) {
+                mediaTypesConfig = ImagePicker.MediaType.Images;
+                console.log('Sử dụng ImagePicker.MediaType.Images');
+            } else if (ImagePicker.MediaTypeOptions && ImagePicker.MediaTypeOptions.Images) {
+                // Fallback cho các phiên bản cũ hơn của expo-image-picker
+                mediaTypesConfig = ImagePicker.MediaTypeOptions.Images;
+                console.log('Sử dụng ImagePicker.MediaTypeOptions.Images (fallback)');
+            } else {
+                console.error('Không tìm thấy ImagePicker.MediaType.Images hoặc ImagePicker.MediaTypeOptions.Images');
+                Alert.alert('Lỗi', 'Không thể xác định loại phương tiện. Vui lòng kiểm tra cài đặt thư viện ảnh của bạn.');
+                return;
+            }
+
+            let result = await ImagePicker.launchImageLibraryAsync({
+                mediaTypes: mediaTypesConfig, // Sử dụng cấu hình đã xác định
+                allowsEditing: true,
+                aspect: [1, 1],
+                quality: 1,
+            });
+
+            if (!result.canceled) {
+                console.log('Ảnh đã được chọn:', result.assets[0].uri);
+                setAvatar(result.assets[0].uri); // Cập nhật URI của ảnh đại diện
+            } else {
+                console.log('Người dùng đã hủy chọn ảnh.');
+            }
+        } catch (error) {
+            console.error('Lỗi khi mở thư viện ảnh hoặc chọn ảnh:', error);
+            Alert.alert('Lỗi', 'Đã xảy ra lỗi khi chọn ảnh: ' + error.message);
         }
     };
 
-    const uploadImage = async (uri, path) => {
-        const response = await fetch(uri);
-        const blob = await response.blob();
-        const imageRef = storageRef(storage, path);
-        await uploadBytes(imageRef, blob);
-        return getDownloadURL(imageRef);
+    // Hàm tải ảnh lên Cloudinary
+    const uploadImageToCloudinary = async (uri) => {
+        try {
+            const formData = new FormData();
+            formData.append('file', {
+                uri: uri,
+                type: 'image/jpeg', // Hoặc 'image/png' tùy loại ảnh
+                name: `avatar_${userId}_${Date.now()}.jpg`, // Tên file duy nhất
+            });
+            formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+            // Nếu bạn dùng signed upload, bạn sẽ cần thêm signature và timestamp ở đây
+            // formData.append('timestamp', yourTimestamp);
+            // formData.append('signature', yourSignature);
+            // formData.append('api_key', 'YOUR_CLOUDINARY_API_KEY'); // Chỉ thêm nếu dùng unsigned upload và bạn chấp nhận rủi ro
+
+            const response = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+                method: 'POST',
+                body: formData,
+                headers: {
+                    'Content-Type': 'multipart/form-data',
+                },
+            });
+
+            const data = await response.json();
+
+            if (data.secure_url) {
+                return data.secure_url; // Trả về URL an toàn của ảnh đã tải lên
+            } else {
+                // Log lỗi chi tiết từ Cloudinary để dễ debug
+                console.error("Lỗi phản hồi từ Cloudinary:", data);
+                Alert.alert('Lỗi', `Không thể tải ảnh lên Cloudinary. Vui lòng kiểm tra console để biết chi tiết lỗi: ${data.error?.message || 'Lỗi không xác định'}.`);
+                throw new Error(data.error?.message || 'Lỗi không xác định từ Cloudinary.');
+            }
+        } catch (error) {
+            console.error("Lỗi khi tải ảnh lên Cloudinary:", error);
+            Alert.alert('Lỗi', `Không thể tải ảnh lên Cloudinary: ${error.message || 'Lỗi không xác định'}.`);
+            throw error; // Ném lỗi để xử lý ở hàm gọi
+        }
     };
 
+    // Hàm xử lý cập nhật hồ sơ
     const handleUpdateProfile = async () => {
         if (userData && userId) {
             const userRef = ref(db, `Users/${userId}`);
             const updates = {};
 
+            // Kiểm tra và cập nhật các trường dữ liệu
             if (displayName !== userData.Username) {
                 updates.Username = displayName;
             }
-            updates.showDisplayName = showDisplayName;
+            updates.showDisplayName = showDisplayName; // Luôn cập nhật trạng thái hiển thị tên
             if (location !== userData.Location) {
                 updates.Location = location;
             }
@@ -109,42 +209,33 @@ const HoSo = () => {
                 updates.Pronouns = pronouns;
             }
 
+            // Xử lý tải lên và cập nhật ảnh đại diện
             if (avatar && avatar !== userData.Avatar) {
                 try {
-                    const avatarUrl = await uploadImage(avatar, `avatars/${userId}`);
+                    const avatarUrl = await uploadImageToCloudinary(avatar); // Gọi hàm tải lên Cloudinary
                     updates.Avatar = avatarUrl;
                 } catch (error) {
-                    console.error("Lỗi tải lên avatar:", error);
-                    alert('Lỗi khi tải lên ảnh đại diện.');
+                    // Lỗi đã được xử lý trong hàm uploadImageToCloudinary, chỉ cần return để dừng
                     return;
                 }
             }
 
-            if (coverPhoto && coverPhoto !== userData.CoverPhoto) {
-                try {
-                    const coverUrl = await uploadImage(coverPhoto, `covers/${userId}`);
-                    updates.CoverPhoto = coverUrl;
-                } catch (error) {
-                    console.error("Lỗi tải lên ảnh nền:", error);
-                    alert('Lỗi khi tải lên ảnh nền.');
-                    return;
-                }
-            }
-
+            // Nếu có bất kỳ thay đổi nào, thực hiện cập nhật vào Firebase Realtime Database
             if (Object.keys(updates).length > 0) {
                 update(userRef, updates)
                     .then(() => {
-                        alert('Hồ sơ đã được cập nhật!');
+                        Alert.alert('Thành công', 'Hồ sơ đã được cập nhật!');
                     })
                     .catch((error) => {
-                        alert('Đã có lỗi xảy ra khi cập nhật: ' + error.message);
+                        Alert.alert('Lỗi', 'Đã có lỗi xảy ra khi cập nhật: ' + error.message);
                     });
             } else {
-                alert('Không có thay đổi nào được thực hiện.');
+                Alert.alert('Thông báo', 'Không có thay đổi nào được thực hiện.');
             }
         }
     };
 
+    // Hiển thị trạng thái tải nếu chưa có dữ liệu người dùng
     if (!userData) {
         return (
             <View style={styles.container}>
@@ -161,6 +252,7 @@ const HoSo = () => {
         );
     }
 
+    // Giao diện chính của Hồ sơ
     return (
         <ScrollView style={styles.container}>
 
@@ -173,7 +265,8 @@ const HoSo = () => {
             </View>
 
             <View style={styles.actionSection}>
-                <TouchableOpacity style={styles.avatarButton} onPress={() => pickImage('avatar')}>
+                {/* Nút cập nhật ảnh đại diện */}
+                <TouchableOpacity style={styles.avatarButton} onPress={pickImage}>
                     <View style={styles.avatarPlaceholder}>
                         {avatar ? (
                             <Image source={{ uri: avatar }} style={styles.avatarImage} />
@@ -183,20 +276,7 @@ const HoSo = () => {
                             <Ionicons name="person-circle-outline" size={40} color="gray" />
                         )}
                     </View>
-                    <Text style={styles.actionText}>Cập Nhật Hình Ảnh</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity style={styles.coverPhotoButton} onPress={() => pickImage('cover')}>
-                    <View style={styles.coverPhotoPlaceholder}>
-                        {coverPhoto ? (
-                            <Image source={{ uri: coverPhoto }} style={styles.coverImage} />
-                        ) : userData.CoverPhoto ? (
-                            <Image source={{ uri: userData.CoverPhoto }} style={styles.coverImage} />
-                        ) : (
-                            <Ionicons name="image-outline" size={40} color="gray" />
-                        )}
-                    </View>
-                    <Text style={styles.actionText}>Đặt Ảnh Bìa</Text>
+                    <Text style={styles.actionText}>Cập Nhật Ảnh Đại Diện</Text>
                 </TouchableOpacity>
             </View>
 
@@ -217,6 +297,7 @@ const HoSo = () => {
                         onValueChange={setShowDisplayName}
                     />
                 </View>
+                {/* Các trường có thể chỉnh sửa */}
                 <View style={styles.settingItem}>
                     <Text style={styles.settingLabel}>Địa điểm</Text>
                     <TextInput
@@ -272,14 +353,6 @@ const HoSo = () => {
                         </TouchableOpacity>
                     </View>
                 </View>
-
-                <View style={styles.settingItem}>
-                    <Text style={styles.settingLabel}>Trang web cá nhân</Text>
-                    <TextInput
-                        style={styles.textInput}
-                        placeholder="Nhập trang web"
-                    />
-                </View>
             </View>
             <TouchableOpacity style={styles.saveButton} onPress={handleUpdateProfile}>
                 <Text style={styles.saveButtonText}>Lưu</Text>
@@ -300,6 +373,8 @@ const styles = StyleSheet.create({
         paddingHorizontal: 15,
         borderBottomWidth: 1,
         borderBottomColor: '#eee',
+        // Thêm padding top an toàn cho iOS
+        paddingTop: Platform.OS === 'ios' ? 40 : 15,
     },
     headerTitle: {
         fontSize: 18,
@@ -355,23 +430,6 @@ const styles = StyleSheet.create({
         fontSize: 16,
         color: '#333',
     },
-    coverPhotoButton: {
-        flexDirection: 'row',
-        alignItems: 'center',
-    },
-    coverPhotoPlaceholder: {
-        width: 50,
-        height: 50,
-        backgroundColor: '#ddd',
-        justifyContent: 'center',
-        alignItems: 'center',
-        marginRight: 15,
-        overflow: 'hidden',
-    },
-    coverImage: {
-        width: '100%',
-        height: '100%',
-    },
     settingsSection: {
         paddingHorizontal: 15,
         paddingVertical: 20,
@@ -391,6 +449,8 @@ const styles = StyleSheet.create({
     settingValue: {
         fontSize: 16,
         color: 'gray',
+        flexShrink: 1, // Cho phép text co lại nếu quá dài
+        textAlign: 'right',
     },
     textInput: {
         flex: 1,

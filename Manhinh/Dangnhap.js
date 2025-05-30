@@ -4,7 +4,7 @@ import { View, Text, TextInput, TouchableOpacity, StyleSheet, Dimensions, Alert 
 import { useNavigation } from '@react-navigation/native';
 import { signInWithEmailAndPassword } from 'firebase/auth';
 import { auth, db } from '../firebase';
-import { ref, get } from 'firebase/database';
+import { ref, get, update } from 'firebase/database'; // Import 'update'
 
 const { width, height } = Dimensions.get('window');
 
@@ -24,17 +24,20 @@ const Dangnhap = () => {
         try {
             let email = usernameOrEmail; // Giả sử đầu vào là email
             const emailRegex = /^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$/;
+            let userInfo = null; // Biến để lưu thông tin người dùng
+
             if (!emailRegex.test(usernameOrEmail)) {
                 // Nếu không phải email, coi như là username và tìm email trong DB
                 const usersRef = ref(db, 'Users');
                 const snapshot = await get(usersRef);
                 email = null; // Reset email
-                let foundUser = null;
                 snapshot.forEach((child) => {
                     const userData = child.val();
                     if (userData.Username === usernameOrEmail) {
                         email = userData.Email;
-                        foundUser = userData;
+                        userInfo = userData; // Lưu thông tin người dùng tìm được
+                        // Bạn cũng có thể muốn lưu key của child nếu cần để cập nhật,
+                        // nhưng ở đây chúng ta sẽ dùng uid từ Auth sau khi đăng nhập.
                     }
                 });
                 if (!email) {
@@ -42,38 +45,41 @@ const Dangnhap = () => {
                     setLoading(false);
                     return;
                 }
-                // Nếu tìm thấy username, chúng ta cũng có thông tin người dùng
-                const userCredential = await signInWithEmailAndPassword(auth, email, password);
-                const user = userCredential.user;
-                const userId = user.uid;
-                console.log("Đăng nhập thành công với username, User ID:", userId, "Thông tin người dùng:", foundUser);
-                setLoading(false);
-                navigation.replace('Home', { userId: userId, userInfo: foundUser });
-            } else {
-                // Đăng nhập bằng email
-                const userCredential = await signInWithEmailAndPassword(auth, email, password);
-                const user = userCredential.user;
-                const userId = user.uid;
+            }
 
-                // Lấy thông tin người dùng từ database dựa trên UID
+            // Đăng nhập bằng email hoặc email tìm được từ username
+            const userCredential = await signInWithEmailAndPassword(auth, email, password);
+            const user = userCredential.user;
+            const userId = user.uid;
+
+            // Lấy thông tin người dùng từ database (nếu chưa có từ tìm kiếm username)
+            if (!userInfo) {
                 const userRef = ref(db, `Users/${userId}`);
                 const snapshot = await get(userRef);
-                const userInfo = snapshot.val();
-
-                console.log("Đăng nhập thành công với email, User ID:", userId, "Thông tin người dùng:", userInfo);
-                setLoading(false);
-                navigation.replace('Home', { userId: userId, userInfo: userInfo });
+                userInfo = snapshot.val();
             }
+
+            // Cập nhật trường LastLogin trong Firebase Realtime Database
+            const userDbRef = ref(db, `Users/${userId}`);
+            await update(userDbRef, {
+                LastLogin: new Date().toISOString() // Lưu thời gian hiện tại ở định dạng ISO
+            });
+
+            console.log("Đăng nhập thành công, User ID:", userId, "Thông tin người dùng:", userInfo);
+            setLoading(false);
+            navigation.replace('Home', { userId: userId, userInfo: userInfo });
 
         } catch (error) {
             console.error("Lỗi đăng nhập:", error);
             let errorMessage = 'Đăng nhập không thành công. Vui lòng kiểm tra lại thông tin đăng nhập.';
-            if (error.code === 'auth/user-not-found') {
-                errorMessage = 'Không tìm thấy người dùng với email này.';
+            if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-email') {
+                errorMessage = 'Không tìm thấy người dùng với email hoặc tên đăng nhập này.';
             } else if (error.code === 'auth/wrong-password') {
                 errorMessage = 'Mật khẩu không đúng.';
             } else if (error.code === 'auth/network-request-failed') {
                 errorMessage = "Lỗi mạng. Vui lòng kiểm tra kết nối internet của bạn.";
+            } else if (error.code === 'auth/too-many-requests') {
+                errorMessage = "Tài khoản của bạn đã bị khóa tạm thời do quá nhiều lần đăng nhập sai. Vui lòng thử lại sau.";
             }
             Alert.alert('Lỗi', errorMessage);
             setLoading(false);
@@ -92,6 +98,7 @@ const Dangnhap = () => {
                     onChangeText={setUsernameOrEmail}
                     value={usernameOrEmail}
                     placeholderTextColor="#b0b0b0"
+                    autoCapitalize="none" // Thêm để tránh tự động viết hoa
                 />
                 <TextInput
                     style={styles.input}
@@ -101,7 +108,7 @@ const Dangnhap = () => {
                     value={password}
                     placeholderTextColor="#b0b0b0"
                 />
-                <TouchableOpacity style={styles.loginButton} onPress={handleDangNhap}>
+                <TouchableOpacity style={styles.loginButton} onPress={handleDangNhap} disabled={loading}>
                     <Text style={styles.loginButtonText}>
                         {loading ? 'Đang đăng nhập...' : 'Đăng nhập'}
                     </Text>

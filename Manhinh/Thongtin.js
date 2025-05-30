@@ -72,8 +72,8 @@ const Thongtin = () => {
                         <Text style={styles.listItemText}>Mời bạn bè</Text>
                         <Ionicons name="chevron-forward-outline" size={20} color="gray" />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.listItem} onPress={() => navigateToScreen('VeWattpad')}>
-                        <Text style={styles.listItemText}>Về Wattpad</Text>
+                    <TouchableOpacity style={styles.listItem} onPress={() => navigateToScreen('Dangnhap')}>
+                        <Text style={styles.listItemText}>Đăng xuất</Text>
                         <Ionicons name="chevron-forward-outline" size={20} color="gray" />
                     </TouchableOpacity>
                 </View>
